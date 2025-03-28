@@ -1,8 +1,15 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordRequestForm
 import httpx
 import logging
 import os
 from typing import Optional, Dict
+from pydantic import BaseModel
+from datetime import timedelta
+from auth import (
+    User, Token, authenticate_user, create_access_token,
+    get_current_active_user, ACCESS_TOKEN_EXPIRE_MINUTES
+)
 
 # 配置日志
 logging.basicConfig(
@@ -12,72 +19,120 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="D-Mid Middleware")
+app = FastAPI(
+    title="D-Mid Middleware",
+    description="这是一个代码扫描中间件服务，用于连接用户和 AI 代码扫描服务。",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
 # 模拟公共 AI API 地址
 PUBLIC_AI_API_URL = os.getenv("PUBLIC_AI_API_URL", "https://api.example.com/scan")
 
-# 用户 API 密钥（模拟数据库，实际可用 Redis 或数据库）
-def get_valid_api_keys() -> Dict[str, str]:
-    """获取有效的 API 密钥，支持测试环境"""
-    if os.getenv("TESTING"):
-        return {
-            "test_user": os.getenv("API_KEY_TEST_USER", "test-api-key")
-        }
-    return {
-        "user1": os.getenv("API_KEY_USER1", "secret-key-123"),
-        "user2": os.getenv("API_KEY_USER2", "secret-key-456")
-    }
+# 请求模型
+class ScanRequest(BaseModel):
+    code: str
+    language: str
+    options: Optional[Dict] = None
 
-# 认证依赖函数
-async def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    if not x_api_key:
-        logger.warning("Missing API key")
-        raise HTTPException(status_code=401, detail="API key required")
-    
-    # 检查密钥是否有效并返回用户ID
-    valid_keys = get_valid_api_keys()
-    for user_id, key in valid_keys.items():
-        if x_api_key == key:
-            return user_id
-    logger.warning(f"Invalid API key: {x_api_key}")
-    raise HTTPException(status_code=401, detail="Invalid API key")
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "code": "def hello_world():\n    print('Hello, World!')",
+                "language": "python",
+                "options": {
+                    "max_line_length": 80,
+                    "check_style": True
+                }
+            }
+        }
+
+# 响应模型
+class ScanResponse(BaseModel):
+    status: str
+    result: Dict
+    user_id: str
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "success",
+                "result": {
+                    "issues": [],
+                    "score": 95,
+                    "suggestions": []
+                },
+                "user_id": "user1"
+            }
+        }
 
 # 健康检查端点
 @app.get("/health")
 async def health_check():
+    """健康检查端点"""
     return {"status": "healthy"}
 
+# 认证端点
+@app.post("/token", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    """获取访问令牌"""
+    user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
 # 代码扫描端点
-@app.post("/scan")
+@app.post("/scan", response_model=ScanResponse)
 async def scan_code(
-    request_data: dict,
-    user_id: str = Depends(verify_api_key)
+    request_data: ScanRequest,
+    current_user: User = Depends(get_current_active_user)
 ):
+    """
+    代码扫描端点
+    
+    Args:
+        request_data: 包含代码和扫描选项的请求数据
+        current_user: 当前认证用户
+        
+    Returns:
+        ScanResponse: 扫描结果
+        
+    Raises:
+        HTTPException: 当扫描服务出错时
+    """
     # 优化日志显示，避免显示大量数据
-    log_data = request_data.copy()
+    log_data = request_data.model_dump()
     if "code" in log_data and len(str(log_data["code"])) > 100:
         log_data["code"] = f"{str(log_data['code'])[:100]}... (truncated)"
-    logger.info(f"User {user_id} sent scan request: {log_data}")
+    logger.info(f"User {current_user.username} sent scan request: {log_data}")
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 PUBLIC_AI_API_URL,
-                json=request_data,
+                json=request_data.model_dump(),
                 timeout=30.0
             )
             response.raise_for_status()
             result = response.json()
 
-        logger.info(f"User {user_id} scan completed")
-        return {"status": "success", "result": result, "user_id": user_id}
+        logger.info(f"User {current_user.username} scan completed")
+        return {"status": "success", "result": result, "user_id": current_user.username}
 
     except httpx.RequestError as e:
-        logger.error(f"User {user_id} failed to call AI API: {str(e)}")
+        logger.error(f"User {current_user.username} failed to call AI API: {str(e)}")
         raise HTTPException(status_code=500, detail="AI service unavailable")
     except httpx.HTTPStatusError as e:
-        logger.error(f"User {user_id} AI API error: {e.response.status_code}")
+        logger.error(f"User {current_user.username} AI API error: {e.response.status_code}")
         raise HTTPException(status_code=e.response.status_code, detail="AI service error")
 
 if __name__ == "__main__":

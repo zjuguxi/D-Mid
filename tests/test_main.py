@@ -7,6 +7,7 @@ import asyncio
 from fastapi import HTTPException
 import httpx
 import logging
+from auth import create_access_token
 
 # 配置测试日志
 logger = logging.getLogger(__name__)
@@ -15,9 +16,14 @@ logger = logging.getLogger(__name__)
 client = TestClient(app)
 
 # 测试数据
-TEST_API_KEY = "test-api-key"
-TEST_USER_ID = "test_user"
+TEST_USERNAME = "test_user"
+TEST_PASSWORD = "test123"
 TEST_RESPONSE = {"result": "test result"}
+
+# 获取测试令牌
+def get_test_token():
+    """获取测试用的访问令牌"""
+    return create_access_token({"sub": TEST_USERNAME})
 
 # 模拟环境变量
 @pytest.fixture(autouse=True)
@@ -25,11 +31,8 @@ def setup_env():
     """设置测试环境变量"""
     logger.info("Setting up test environment")
     os.environ["TESTING"] = "true"
-    os.environ["API_KEY_TEST_USER"] = TEST_API_KEY
     yield
     logger.info("Cleaning up test environment")
-    if "API_KEY_TEST_USER" in os.environ:
-        del os.environ["API_KEY_TEST_USER"]
     if "TESTING" in os.environ:
         del os.environ["TESTING"]
 
@@ -42,30 +45,54 @@ def test_health_check():
     assert response.status_code == 200
     assert response.json() == {"status": "healthy"}
 
-# API Key 验证测试
-def test_scan_without_api_key():
-    """测试不带 API key 的扫描请求"""
-    logger.info("Testing scan request without API key")
-    response = client.post("/scan", json={"code": "test code"})
-    logger.debug(f"Response status: {response.status_code}")
-    assert response.status_code == 401
-    assert response.json()["detail"] == "API key required"
+# 认证测试
+def test_login_success():
+    """测试登录成功"""
+    logger.info("Testing successful login")
+    response = client.post(
+        "/token",
+        data={
+            "username": TEST_USERNAME,
+            "password": TEST_PASSWORD
+        }
+    )
+    logger.debug(f"Login response: {response.json()}")
+    assert response.status_code == 200
+    assert "access_token" in response.json()
+    assert response.json()["token_type"] == "bearer"
 
-def test_scan_with_invalid_api_key():
-    """测试使用无效的 API key"""
-    logger.info("Testing scan request with invalid API key")
+def test_login_failure():
+    """测试登录失败"""
+    logger.info("Testing failed login")
+    response = client.post(
+        "/token",
+        data={
+            "username": TEST_USERNAME,
+            "password": "wrong_password"
+        }
+    )
+    logger.debug(f"Login response: {response.json()}")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "用户名或密码错误"
+
+# API 访问测试
+def test_scan_code_without_token():
+    """测试不带令牌的扫描请求"""
+    logger.info("Testing scan request without token")
     response = client.post(
         "/scan",
-        json={"code": "test code"},
-        headers={"X-API-Key": "invalid-key"}
+        json={
+            "code": "def hello():\n    print('Hello')",
+            "language": "python"
+        }
     )
     logger.debug(f"Response status: {response.status_code}")
     assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid API key"
 
-def test_scan_with_valid_api_key():
-    """测试使用有效的 API key"""
-    logger.info("Testing scan request with valid API key")
+def test_scan_code_with_valid_token():
+    """测试使用有效的令牌"""
+    logger.info("Testing scan request with valid token")
+    token = get_test_token()
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = MagicMock(
             status_code=200,
@@ -75,19 +102,24 @@ def test_scan_with_valid_api_key():
         
         response = client.post(
             "/scan",
-            json={"code": "test code"},
-            headers={"X-API-Key": TEST_API_KEY}
+            json={
+                "code": "def hello():\n    print('Hello')",
+                "language": "python"
+            },
+            headers={"Authorization": f"Bearer {token}"}
         )
         logger.debug(f"Response: {response.json()}")
         assert response.status_code == 200
-        assert response.json()["status"] == "success"
-        assert response.json()["result"] == TEST_RESPONSE
-        assert response.json()["user_id"] == TEST_USER_ID
+        data = response.json()
+        assert data["status"] == "success"
+        assert "result" in data
+        assert data["user_id"] == TEST_USERNAME
 
 # 请求数据测试
 def test_scan_with_empty_data():
     """测试空数据请求"""
     logger.info("Testing scan request with empty data")
+    token = get_test_token()
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = MagicMock(
             status_code=200,
@@ -97,8 +129,11 @@ def test_scan_with_empty_data():
         
         response = client.post(
             "/scan",
-            json={},
-            headers={"X-API-Key": TEST_API_KEY}
+            json={
+                "code": "",
+                "language": "python"
+            },
+            headers={"Authorization": f"Bearer {token}"}
         )
         logger.debug(f"Response status: {response.status_code}")
         assert response.status_code == 200
@@ -106,7 +141,7 @@ def test_scan_with_empty_data():
 def test_scan_with_large_data():
     """测试大数据请求"""
     logger.info("Testing scan request with large data")
-    large_data = {"code": "x" * 1000000}  # 1MB 数据
+    token = get_test_token()
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = MagicMock(
             status_code=200,
@@ -116,8 +151,11 @@ def test_scan_with_large_data():
         
         response = client.post(
             "/scan",
-            json=large_data,
-            headers={"X-API-Key": TEST_API_KEY}
+            json={
+                "code": "x" * 1000000,  # 1MB 数据
+                "language": "python"
+            },
+            headers={"Authorization": f"Bearer {token}"}
         )
         logger.debug(f"Response status: {response.status_code}")
         assert response.status_code == 200
@@ -126,13 +164,17 @@ def test_scan_with_large_data():
 def test_scan_with_network_error():
     """测试网络错误"""
     logger.info("Testing scan request with network error")
+    token = get_test_token()
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.side_effect = httpx.RequestError("Network error")
         
         response = client.post(
             "/scan",
-            json={"code": "test code"},
-            headers={"X-API-Key": TEST_API_KEY}
+            json={
+                "code": "test code",
+                "language": "python"
+            },
+            headers={"Authorization": f"Bearer {token}"}
         )
         logger.debug(f"Response status: {response.status_code}")
         assert response.status_code == 500
@@ -141,6 +183,7 @@ def test_scan_with_network_error():
 def test_scan_with_http_error():
     """测试 HTTP 错误"""
     logger.info("Testing scan request with HTTP error")
+    token = get_test_token()
     with patch("httpx.AsyncClient.post") as mock_post:
         # 创建一个模拟的响应对象
         mock_response = MagicMock()
@@ -152,8 +195,11 @@ def test_scan_with_http_error():
         
         response = client.post(
             "/scan",
-            json={"code": "test code"},
-            headers={"X-API-Key": TEST_API_KEY}
+            json={
+                "code": "test code",
+                "language": "python"
+            },
+            headers={"Authorization": f"Bearer {token}"}
         )
         logger.debug(f"Response status: {response.status_code}")
         assert response.status_code == 500
@@ -164,13 +210,17 @@ def test_scan_with_http_error():
 async def test_scan_timeout():
     """测试请求超时"""
     logger.info("Testing scan request timeout")
+    token = get_test_token()
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.side_effect = httpx.TimeoutException("Timeout")
         
         response = client.post(
             "/scan",
-            json={"code": "test code"},
-            headers={"X-API-Key": TEST_API_KEY}
+            json={
+                "code": "test code",
+                "language": "python"
+            },
+            headers={"Authorization": f"Bearer {token}"}
         )
         logger.debug(f"Response status: {response.status_code}")
         assert response.status_code == 500
@@ -181,11 +231,15 @@ async def test_scan_timeout():
 async def test_concurrent_requests():
     """测试并发请求"""
     logger.info("Testing concurrent requests")
+    token = get_test_token()
     async def make_request():
         return client.post(
             "/scan",
-            json={"code": "test code"},
-            headers={"X-API-Key": TEST_API_KEY}
+            json={
+                "code": "test code",
+                "language": "python"
+            },
+            headers={"Authorization": f"Bearer {token}"}
         )
     
     with patch("httpx.AsyncClient.post") as mock_post:
@@ -209,7 +263,7 @@ async def test_concurrent_requests():
 def test_scan_with_special_characters():
     """测试特殊字符"""
     logger.info("Testing scan request with special characters")
-    special_data = {"code": "!@#$%^&*()_+{}[]|\\:;\"'<>,.?/~`"}
+    token = get_test_token()
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = MagicMock(
             status_code=200,
@@ -219,8 +273,11 @@ def test_scan_with_special_characters():
         
         response = client.post(
             "/scan",
-            json=special_data,
-            headers={"X-API-Key": TEST_API_KEY}
+            json={
+                "code": "!@#$%^&*()_+{}[]|\\:;\"'<>,.?/~`",
+                "language": "python"
+            },
+            headers={"Authorization": f"Bearer {token}"}
         )
         logger.debug(f"Response status: {response.status_code}")
         assert response.status_code == 200
@@ -228,7 +285,7 @@ def test_scan_with_special_characters():
 def test_scan_with_unicode_characters():
     """测试 Unicode 字符"""
     logger.info("Testing scan request with Unicode characters")
-    unicode_data = {"code": "你好，世界！"}
+    token = get_test_token()
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = MagicMock(
             status_code=200,
@@ -238,8 +295,11 @@ def test_scan_with_unicode_characters():
         
         response = client.post(
             "/scan",
-            json=unicode_data,
-            headers={"X-API-Key": TEST_API_KEY}
+            json={
+                "code": "你好，世界！",
+                "language": "python"
+            },
+            headers={"Authorization": f"Bearer {token}"}
         )
         logger.debug(f"Response status: {response.status_code}")
         assert response.status_code == 200 
