@@ -4,7 +4,7 @@ import httpx
 import logging
 import os
 from typing import Optional, Dict
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import timedelta
 from auth import (
     User, Token, authenticate_user, create_access_token,
@@ -32,12 +32,9 @@ PUBLIC_AI_API_URL = os.getenv("PUBLIC_AI_API_URL", "https://api.example.com/scan
 
 # 请求模型
 class ScanRequest(BaseModel):
-    code: str
-    language: str
-    options: Optional[Dict] = None
-
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
             "example": {
                 "code": "def hello_world():\n    print('Hello, World!')",
                 "language": "python",
@@ -47,15 +44,16 @@ class ScanRequest(BaseModel):
                 }
             }
         }
+    )
+    code: str
+    language: str
+    options: Optional[Dict] = None
 
 # 响应模型
 class ScanResponse(BaseModel):
-    status: str
-    result: Dict
-    user_id: str
-
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
             "example": {
                 "status": "success",
                 "result": {
@@ -66,6 +64,10 @@ class ScanResponse(BaseModel):
                 "user_id": "user1"
             }
         }
+    )
+    status: str
+    result: Dict
+    user_id: str
 
 # 健康检查端点
 @app.get("/health")

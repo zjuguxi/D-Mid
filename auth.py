@@ -1,10 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 # 配置
 SECRET_KEY = "your-secret-key-here"  # 在生产环境中应该使用环境变量
@@ -19,6 +19,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # 用户模型
 class User(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     username: str
     email: Optional[str] = None
     full_name: Optional[str] = None
@@ -28,10 +29,12 @@ class UserInDB(User):
     hashed_password: str
 
 class Token(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     access_token: str
     token_type: str
 
 class TokenData(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     username: Optional[str] = None
 
 # 模拟用户数据库
@@ -73,9 +76,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """创建访问令牌"""
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(UTC) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.now(UTC) + timedelta(minutes=15)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
